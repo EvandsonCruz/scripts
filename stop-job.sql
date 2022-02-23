@@ -1,0 +1,1 @@
+exec sys.dbms_scheduler.STOP_JOB(job_name=>'SYS.ORA$AT_OS_OPT_SY_12856', force=>true);

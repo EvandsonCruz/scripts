@@ -1,0 +1,219 @@
+
+https://docs.oracle.com/en/engineered-systems/exadata-database-machine/sagug/exadata-storage-server-snapshots.html#GUID-78F67DD0-93C8-4944-A8F0-900D910A06A0
+
+               *** Configurando master
+               create user TOK identified by welcome1 default tablespace users quota unlimited on users;
+               create table TOK.TABELA01(ID NUMBER(5), COLUNA_A VARCHAR2(30), COLUNA_B VARCHAR2(30));
+               INSERT INTO TOK.TABELA01 VALUES(1, 'VALOR1','VALOR2');
+
+               ALTER DISKGROUP DATA03C01 set ownership owner='oracle' for file '+DATA03C01/MASTER/DATAFILE/system.2916.1073990447';
+               ALTER DISKGROUP DATA03C01 set ownership owner='oracle' for file '+DATA03C01/MASTER/DATAFILE/sysaux.2923.1073990481';
+               ALTER DISKGROUP DATA03C01 set ownership owner='oracle' for file '+DATA03C01/MASTER/DATAFILE/undotbs1.2924.1073990497';
+               ALTER DISKGROUP DATA03C01 set ownership owner='oracle' for file '+DATA03C01/MASTER/DATAFILE/users.2925.1073990497';
+
+               /u01/app/oracle/diag/rdbms/master/master/trace/master_ora_70050.trc
+               CREATE PFILE = '/home/oracle/boechat/init_master.ora' FROM SPFILE;
+
+######################################################################################################################################
+
+               *** Configurando snap clone
+
+Bancos VDB de desenvolvimento 01devcln
+banco01cln
+banco02cln
+banco03cln
+banco04cln
+
+Bancos VDB de homologação 01devcln
+banco01cln
+banco02cln
+banco03cln
+banco04cln
+
+Banco Pré produção
+bancostage01cln
+
+
+1ª Parar a sincronia do manter
+
+Base Primaria [PROD]
+ alter system set log_archive_dest_state_2="defer" scope=both;
+
+Base Secundaria [MASTER]
+ alter database recover managed standby database cancel;
+ shutdown immediate
+ startup
+
+https://docs.oracle.com/database/121/SBYDB/manage_ps.htm#SBYDB4803
+########Converting a Physical Standby Database into a Snapshot Standby Database
+Perform the following steps to convert a physical standby database into a snapshot standby database:
+
+Stop Redo Apply, if it is active.
+Ensure that the database is mounted, but not open.
+Ensure that a fast recovery area has been configured. It is not necessary for flashback database to be enabled.
+Issue the following SQL statement to perform the conversion:
+SQL> ALTER DATABASE CONVERT TO SNAPSHOT STANDBY;
+Open the snapshot standby in read/write mode by issuing the following SQL statement:
+SQL> ALTER DATABASE OPEN READ WRITE;
+
+alter database recover managed standby database cancel;
+ALTER DATABASE CONVERT TO SNAPSHOT STANDBY;
+ALTER DATABASE OPEN READ ONLY;
+
+
+#######Converting a Snapshot Standby Database into a Physical Standby Database
+Perform the following steps to convert a snapshot standby database into a physical standby database:
+
+On an Oracle Real Applications Cluster (Oracle RAC) database, shut down all but one instance.
+Ensure that the database is mounted, but not open.
+Issue the following SQL statement to perform the conversion:
+SQL> ALTER DATABASE CONVERT TO PHYSICAL STANDBY;
+Redo data received while the database was a snapshot standby database is automatically applied when Redo Apply is started.
+
+
+2ª alterar datafiles para somente leitura. [MASTER]
+
+. /home/oracle/tsmst.env
+sqlplus / as sysdba
+set head off
+set lines 1000
+set pages 1000
+set feedback off
+spool /home/oracle/oci/clone01/set_permission_dbfile_rdonly.sql
+select 'ALTER DISKGROUP DATAC1 set permission owner=read ONLY, group=read ONLY, other=none for file ' ||'''' || name || '''' || ';'
+  from v$datafile;
+ order by tablespace_name;
+spool off
+
+3ª Criar SPFILE baseado nos parametros de PROD para Clone VDB
+**** Ponto de atenção configuração de memoria.
+
+[PROD]
+create pfile='/home/oracle/oci/clone01/init_clone01.ora' from spfile; 
+
+[MASTER]
+startup pfile='/home/oracle/oci/clone01/init_01devcln.ora' nomount
+
+Parametros de exemplo: pode ser ajustado de acardo com a disponibilidade de memoria do servidor.
+
+alter system set sga_max_size=10G scope=spfile;                
+alter system set sga_target=10G scope=spfile;                     
+alter system set pga_aggregate_limit=5G scope=spfile;            
+alter system set pga_aggregate_target=5G scope=spfile;           
+alter system set shared_pool_reserved_size=256M scope=spfile;     
+alter system set shared_pool_size=5G scope=spfile;               
+alter system set java_pool_size=576M scope=spfile;                 
+
+4ª Habilitar ACCESS_CONTROL [MASTER] a nivel de ASM
+##ASM
+If access control is not already enabled on the disk group that contains the test masters data files, then enable access control on the disk group.
+The disk group must be on Oracle Exadata storage servers.
+
+select ad.name, att.*
+  from v$asm_attribute att
+ inner join v$asm_diskgroup ad
+    on att.group_number = ad.group_number
+ where att.name = 'access_control.enabled';
+
+ALTER DISKGROUP DATAC1 SET ATTRIBUTE 'ACCESS_CONTROL.ENABLED' = 'TRUE';
+
+5ª Ownership of the Test Master Data Files [MASTER]
+
+set newpage 0
+set linesize 999
+set pagesize 0
+set feedback off
+set heading off
+set echo off
+set space 0
+set tab off
+set trimspool on
+. /home/oracle/tsmst.env
+sqlplus / as sysdba
+set head off
+set lines 1000
+set pages 1000
+set feedback off
+spool /home/oracle/oci/clone01/set_owner_tsmst.sql
+select 'ALTER DISKGROUP DATAC1 set ownership owner='||''''||'oracle'||''''||' for file '||''''||name||''''||';' from v$datafile;
+exit
+
+
+6ª  create control file
+
+****** Desabilitar o parametro do cluster  [VDB]
+
+alter system set cluster_database=false scope=spfile;
+
+Parametros para criação do controlfile
+datafiles
+redolog
+caracterset
+
+select ''''||file_name||''''||',' from dba_data_files
+    order by tablespace_name;
+
+SELECT * FROM V$LOGFILE
+  where type = 'ONLINE';
+
+SELECT * FROM V$LOG;
+
++DATAC1/01DEVCLN
++RECOC1/01DEVCLN
+
+SELECT * FROM NLS_DATABASE_PARAMETERS;
+
+alter system set cluster_database=true scope=spfile;
+
+###################################################################################################
+
+7ª  Clone files [VDB]
+
+NAME                             TOTAL_MB    FREE_MB
+------------------------------ ---------- ----------
+DATAC1                          282488832   65224812
+RECOC1                           94150656   72251628
+SPRC1                           941506560  941495208
+
+SET newpage 0
+SET linesize 999
+SET pagesize 0
+SET feedback off
+SET heading off
+SET echo off
+SET space 0
+SET tab off
+SET trimspool on
+SPOOL /home/oracle/oci/clone01/rename_files_dev01cln.sql
+SELECT 'EXECUTE dbms_dnfs.clonedb_renamefile -
+('||''''||name||''''||','||''''||REPLACE(REPLACE(REPLACE(name,'.','_'),-
+'TSMST','DEV01CLN'),'+DATAC1','+SPRC1')||''''||');' FROM v$datafile;
+EXIT
+
+
+EXECUTE dbms_dnfs.clonedb_renamefile  ('+DATA03C01/MASTER/DATAFILE/system.2916.1073990447','+SPARSE/CLONE3/DATAFILE/system_2916_1073990447');
+EXECUTE dbms_dnfs.clonedb_renamefile  ('+DATA03C01/MASTER/DATAFILE/sysaux.2923.1073990481','+SPARSE/CLONE3/DATAFILE/sysaux_2923_1073990481');
+EXECUTE dbms_dnfs.clonedb_renamefile  ('+DATA03C01/MASTER/DATAFILE/undotbs1.2924.1073990497','+SPARSE/CLONE3/DATAFILE/undotbs1_2924_1073990497');
+EXECUTE dbms_dnfs.clonedb_renamefile  ('+DATA03C01/MASTER/DATAFILE/users.2925.1073990497','+SPARSE/CLONE3/DATAFILE/users_2925_1073990497');
+
+alter system set job_queue_processes=0 scope=both;
+alter system set "_allow_resetlogs_corruption"=true  scope=spfile;
+alter system set "_allow_resetlogs_corruption"=false scope=spfile;
+
+8ª Adcionar tempfile [VDB]
+
+SELECT
+FILE_ID ID,
+TABLESPACE_NAME TABLESPACE,
+FILE_NAME DATAFILE,
+BYTES/(1024*1024) TAMANHO_MB,
+MAXBYTES/(1024*1024) MAXIMO_MB,
+STATUS
+FROM DBA_TEMP_FILES
+ORDER BY FILE_ID, TABLESPACE_NAME, FILE_NAME
+
+ALTER TABLESPACE temp ADD TEMPFILE '+DATAC1' SIZE 200M REUSE AUTOEXTEND ON NEXT 100M MAXSIZE 2000M;
+
+9ª Consulta apos abertura do banco.
+
+SELECT filenumber num, clonefilename child, snapshotfilename parent FROM V$CLONEDFILE;
